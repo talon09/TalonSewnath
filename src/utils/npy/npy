@@ -1,0 +1,60 @@
+import numpy as np
+import os
+
+def save_data(data_filename, tag,  array):
+    """"
+    Used to save numpy arrays in an organized output file location and format
+    data_filename (str): Filename of data being inputted into the system, will use this to to create the output data filename 
+    tag (str): example tags:- detection, tracking, etc
+    array (ndarray): array to be saved
+    
+    """
+
+    # Extract the base name without the extension
+    filename_stripped = os.path.splitext(os.path.basename(data_filename))[0]
+
+    project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    
+    # Create the directory path
+    directory_path = os.path.join(project_dir, 'data', 'output', filename_stripped)
+    
+    # Ensure the directory exists
+    os.makedirs(directory_path, exist_ok=True)
+    
+    # Create the full path for the .npy file
+    file_path = os.path.join(directory_path, filename_stripped + "_" + tag + '.npy')
+    print("\nOUTPUT SAVED TO: %s", file_path)
+    
+    # Save the numpy array to the file
+    np.save(file_path, array)
+
+def load_data(data_filename, tag):
+    """
+    
+    Used to load data saved in numpy arrays previously saved using the save_data function
+    data_filename (str): Filename of data being inputted into the system, will use this to determine the numpy array to load if any
+    tag (str): example tags:- detection, tracking, etc
+
+    """
+
+    # Extract the base name without the extension
+    filename_stripped = os.path.splitext(os.path.basename(data_filename))[0]
+
+    project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    # The directory path
+    directory_path = os.path.join(project_dir, 'data', 'output', filename_stripped)
+
+    # Create the full path for the .npy file
+    file_path = os.path.join(directory_path, filename_stripped + "_" + tag + '.npy')
+    print("\nLOADING FILE: %s", file_path)
+
+    if not os.path.exists(file_path):
+        print(f"\nError: The file {file_path} does not exist.")
+        return None
+    try:
+        return np.load(file_path, allow_pickle=True)
+    
+    except (IOError, ValueError) as e:
+        print(f"\nError: Could not load the file {file_path}. {e}")
+        return None
