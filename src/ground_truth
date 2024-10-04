@@ -1,0 +1,221 @@
+################################ FILE DEPENDANCIES: ######################################## 
+# pipeline_config.json                   -                   Contains system parameters 
+# utils folder                           -                   Contains hdf5, npy and camera scripts
+
+import sys
+import os
+
+project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_dir)
+
+from utils.hdf5.camera import cameraHDF5
+from utils.hdf5.depth import depthHDF5
+from utils.npy.npy import save_data
+
+import json
+import time
+import matplotlib.pyplot as plt
+import numpy as np
+import cv2
+from ultralytics import YOLO
+
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+
+def apply_jet_colormap(depth_image):
+    """
+    Apply a jet colormap to the depth image.
+    """
+    # Normalize the depth image to the range 0-255
+    depth_normalized = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
+
+    # Convert the normalized depth image to an 8-bit image
+    depth_8bit = np.uint8(depth_normalized)
+
+    # Apply the jet colormap
+    depth_colormap = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_JET)
+
+    return depth_colormap
+
+def main():
+    print("LOADING CONFIG DATA:")
+    working_dir = os.path.dirname(__file__) # Gets the directory that this script is in
+    path_to_files = os.path.join(working_dir,'BackUp2')
+    entries = os.listdir(path_to_files)
+    entries.sort()
+    length = len(entries)
+    label_list = []
+    oob = []
+    for i in range(length):
+        print(entries[i])
+        f = open(os.path.join(working_dir,'pipeline_config.json')) # Gets the path to the config script
+        pipeline_config = json.load(f) # Loads config
+    
+        #file_name = pipeline_config["FILE_NAME"] # Extracts the HDF5 file needed
+        rotation = pipeline_config["ROTATION"] # Extracts whether the file is rotated or not
+        stereo_config = pipeline_config["STEREO_CONFIG"] # Extracts the camera instrinsics
+        plot = pipeline_config["PLOT"] # Extracts boolean to plot or not
+
+        #start_frame = pipeline_config["START_FRAME"] # Extracts the start frame to process
+        start_frame = 15
+        file_name = entries[i]
+        path_to_data = os.path.join(os.path.join(working_dir,'BackUp2'), file_name)
+        colour_cam = cameraHDF5(path_to_data) # Calls the camera function which
+
+        ## Open camera data
+        print("LOADING COLOUR DATA:")
+        
+        colour_cam = cameraHDF5(path_to_data) # Pulls out the parameters from the HDF5 file
+        col_height = colour_cam.height
+        col_width = colour_cam.width
+        depth_cam = depthHDF5(path_to_data) # Same process as fr the color camera
+        dep_height = depth_cam.height
+        dep_width = depth_cam.width
+
+        num_of_frames_col = colour_cam.get_frame_numbers()[1] # Uses the function in camera.py to get all the frame numbers in the HDF5 file
+        num_of_frames_depth = depth_cam.get_frame_numbers()[1]
+        num_of_frames = min(num_of_frames_col,num_of_frames_depth)
+
+        print("Done.\n")
+
+        cx = stereo_config["CX_DEPTH"]
+        cy = stereo_config["CY_DEPTH"]
+        fx = stereo_config["FX_DEPTH"]
+        fy = stereo_config["FY_DEPTH"]
+
+        # If the box was rotated then these apply
+        if str.lower(rotation) == "counterclockwise":
+            cx = col_height - 1 - stereo_config["CY_DEPTH"]
+            cy = stereo_config["CX_DEPTH"]
+            fx = stereo_config["FY_DEPTH"]
+            fy = stereo_config["FX_DEPTH"]
+            print("Counter clockwise rotation on")
+                
+        elif str.lower(rotation) == "clockwise":
+            cx = stereo_config["CY_DEPTH"]
+            cy = col_width -1 - stereo_config["CX_DEPTH"]
+            fx = stereo_config["FY_DEPTH"]
+            fy = stereo_config["FX_DEPTH"]
+            print("Clockwise rotation on")
+
+        # Load YOLOv8 model
+        ################################################################
+        # I NEED TO LOAD MY MODEL
+        model = YOLO('yolov8n-pose.pt')  # Ensure this model is downloaded or available
+        print("\nPre-trained YOLOv8 Nano Pose model loaded successfully")
+        # LOAD MODEL
+        ################################################################
+
+        desired_class = 0
+        depth_scale = 0.001
+
+        # Optionally, add a legend or color bar if colors represent additional data
+        # For this example, colors are uniform
+
+        # Show the plot
+        plt.show()
+
+
+        meas_frames = np.empty(num_of_frames, dtype=dict) # dict means you can store the data with keys in the array
+
+        
+        rgb_data, rgb_timestamp = colour_cam.get_frame(15)
+        depth_data, depth_timestamp = depth_cam.get_frame(15)
+
+        if str.lower(rotation) == "clockwise":
+            rgb_data = cv2.rotate(rgb_data, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            depth_data = cv2.rotate(depth_data, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+        elif str.lower(rotation) == "counterclockwise":
+            rgb_data = cv2.rotate(rgb_data, cv2.ROTATE_90_CLOCKWISE)
+            depth_data = cv2.rotate(depth_data, cv2.ROTATE_90_CLOCKWISE)
+
+        width_depth = np.shape(depth_data)[1]
+        height_depth = np.shape(depth_data)[0]
+        
+        ##################################################################
+        # results based on pose estimation requirments.
+        # Perform detection
+        if plot:
+            results = model.predict(rgb_data, show=True) 
+        else:
+            results = model.predict(rgb_data)
+        detection_boxes = results[0].boxes.numpy()
+        ##################################################################
+
+        for r in results:
+            keypoints = r.keypoints
+
+        indices = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        point_array = np.squeeze(keypoints.xy.numpy())
+        keypoint_array = point_array[indices]
+        dims = keypoint_array.shape
+
+        #filter out unrequired classes
+        mask = (detection_boxes.cls == desired_class) # creates a mask for where there are valid detections in the detection list
+        detections = detection_boxes.xywh[mask]
+
+        objs_xyz = [] #array of xyz values of each detected objects
+
+        if dims[0] > 0:
+            for k in range(dims[0]):
+                centroid = keypoint_array[k][0:2]
+                x_idx = int(centroid[0]) # centroid x pixel index
+                y_idx = int(centroid[1]) # centroid y pixel index
+                
+                if x_idx < width_depth and y_idx < height_depth:
+                    z = depth_data[y_idx,x_idx] # extracts the depth corresponding to the detection
+                    if z > 0:
+                        #print(z)
+                        z = z * depth_scale # converts the depth values using the conversion factor
+                        x = (centroid[0]-cx) * z /fx #compensating for extrinsics
+                        y = (centroid[1]-cy) * z /fy
+                        xyz = [x,y,z]
+                        #print(xyz)
+                        objs_xyz.append(xyz)
+                    else:
+                        z = z * depth_scale # for now
+                        #z = 1.5
+                        x = (centroid[0]-cx) * z /fx #compensating for extrinsics
+                        y = (centroid[1]-cy) * z /fy
+                        xyz = [x,y,z]
+                        #print(xyz)
+                        objs_xyz.append(xyz)
+                else:
+                    print("Centroid index out of bounds")
+                    oob.append(entries[i])
+
+        objs_xyz = np.array(objs_xyz)
+        objs_xyz[:, 0] = objs_xyz[:, 0] - 1.5
+
+        shifted = np.transpose(objs_xyz)
+
+        maximum = np.max(shifted[:, 1])
+
+        objs_xyz[:, 1] = (-1 * objs_xyz[:, 1]) + maximum
+        label_list.append(objs_xyz)
+
+    #label_array = np.array(label_list)
+    #np.save('test_labels.npy',label_array)
+
+    # closing all open windows 
+    #cv2.destroyAllWindows()
+    tester = np.array(label_list[0])
+
+    print(oob)
+
+    list_len = len(label_list)
+    final_list = []
+    for a in range(list_len):
+        final_list.append(np.array(label_list[a]).flatten())
+
+    label_array = np.array(final_list)
+    np.save('labels.npy',label_array)
+
+    cv2.destroyAllWindows()
+
+    labels_array = np.load('labels.npy')
+
+if __name__ == "__main__":
+    main()
