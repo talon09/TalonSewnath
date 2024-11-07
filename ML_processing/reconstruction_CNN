@@ -312,7 +312,7 @@ def main():
     path_to_labels = os.path.join(path_to_files,'results_labels.npy')
     path_to_data = os.path.join(path_to_files,'results_data.npy')
 
-    X_data = np.load(path_to_data)  # Shape: (num_samples, 8, 8, 4)
+    X_data = np.load(path_to_data)  # Shape: (num_samples, 8, 8, 3)
     y_data = np.load(path_to_labels)  # Shape: (num_samples, 39)
     
     # Perform K-Fold Cross-Validation
