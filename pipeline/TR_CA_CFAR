@@ -1,0 +1,70 @@
+function [detections] = TR_CA_CFAR(range_doppler_map, cfar_range_guard, cfar_range_training, cfar_doppler_guard, cfar_doppler_training,cfar_pfa, cfar_threshold)
+    %{
+        Performs the CFAR process by creating a kernel of size [1 + 2*( cfar_range_guard +  cfar_range_training)] in range axis and
+        [1 + 2*( cfar_doppler_guard +  cfar_doppler_training)))] in the doppler axis. It then takes the fft of the kernal and mutliplies that with the 
+        frequency response of range_doppler_map to and takes the inverse fft of the result to do a 2D convolution. This slides the kernel around the map to perform
+        the CFAR. 
+    
+            input: range_doppler_map        -> must be a 2D array. It is the output of ard process in V.
+            input: cfar_range_guard         -> number of guard cells in range axis.
+            input: cfar_range_training      -> number of training cells in the range axis.
+            input: cfar_doppler_guard       -> number of guard cells in doppler axis.
+            input: cfar_doppler_training    -> number of training cells in the doppler axis.
+            input: cfar_pfa                 -> probability of detection.
+            input: cfar_threshold           -> tuning parameter in W to help set CFAR threshold.
+
+            output: detections          -> 2D matrix of size [nSamples+rangePad,nChirps+dopplerPad] contains value 1 for a detection and 0 for no detection. 
+        
+    %}
+    
+    p_kernel = ones(1 + 2*(cfar_range_guard + cfar_range_training), 1 + 2*(cfar_doppler_guard + cfar_doppler_training));
+    % creates a rectangular filter of size 2 times the range filter
+    % dimension, so including guard cells and training cells. It does the
+    % same for doppler filter dimension.
+
+    % creates the inner guard filter inside the kernel
+    guard = zeros(1 + 2*cfar_range_guard, 1 + 2*cfar_doppler_guard);
+
+    % assigns the inner guard to the kernel
+    for i = cfar_range_training:(cfar_range_training + 2*cfar_range_guard)
+        for j = cfar_doppler_training:(cfar_doppler_training + 2*cfar_doppler_guard)
+            p_kernel(i,j) = 0;
+        end
+    end
+
+    %additional cfar params 
+    pfa =  cfar_pfa;            % probability of false alarms
+    num_train_cells = sum(sum(p_kernel));       % number of training cells
+    alpha = num_train_cells * (pfa^(-1 / num_train_cells) - 1);   % threshold gain
+    dims = size(range_doppler_map);
+    kernel = zeros(dims);
+
+    % Obtaining the power of the range doppler map
+    rdm_power = abs(range_doppler_map).^2;
+
+    dims_2 = size(p_kernel);
+    for i = 1:dims_2(1)
+        for j = 1:dims_2(2)
+            kernel(i,j) = p_kernel(i,j);
+        end
+    end
+
+    kernel = kernel/num_train_cells;
+
+    mask = fft2(kernel); % put mask in frequency
+    noise = ifft2(conj(mask) .* fft2(rdm_power)); % convolution done in frequency
+    row_shift = floor(size(p_kernel, 1) / 2);   % shift that has to be accounted for after the convolution
+    noise = circshift(noise, row_shift, 1);  % account for shift introduced by convolution
+
+    % threshold exceedance
+    indices = rdm_power > (noise * alpha +  cfar_threshold); % does the RD map exceed the cfar threshold at any points?
+    [row,col] = find(indices); % list of [row_idx, col_idx] where there is a possible detections
+    n = size(row);
+
+    local_max_indices = zeros(dims);
+    for i = 1:n
+        local_max_indices(row(i), col(i)) = 1;  % Set the corresponding element to 1
+    end
+
+    detections = local_max_indices;  % Matrix with ones where detection occurred
+end
