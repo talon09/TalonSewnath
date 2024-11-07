@@ -1,0 +1,327 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models, regularizers, callbacks
+from sklearn.model_selection import KFold, train_test_split
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import random
+from tensorflow.keras.layers import Input, Add
+
+# Initialize scalers
+spatial_scaler = StandardScaler()   # For x, y, z coordinates
+output_scaler = StandardScaler()    # For output scaling
+
+def scale_features_separately(X_train, X_val, X_test=None):
+    X_train_spatial = X_train[..., :3].reshape(-1, 3)
+
+    spatial_scaler.fit(X_train_spatial)
+    X_train_spatial_scaled = spatial_scaler.transform(X_train_spatial).reshape(X_train.shape[0], X_train.shape[1], X_train.shape[2], 3)
+
+    X_val_spatial = X_val[..., :3].reshape(-1, 3)
+    X_val_spatial_scaled = spatial_scaler.transform(X_val_spatial).reshape(X_val.shape[0], X_val.shape[1], X_val.shape[2], 3)
+    
+    X_train_scaled = X_train_spatial_scaled
+    X_val_scaled = X_val_spatial_scaled
+    
+    if X_test is not None:
+        X_test_spatial = X_test[..., :3].reshape(-1, 3)
+        X_test_spatial_scaled = spatial_scaler.transform(X_test_spatial).reshape(X_test.shape[0], X_test.shape[1], X_test.shape[2], 3)
+        return X_train_scaled, X_val_scaled, X_test_spatial_scaled
+    else:
+        return X_train_scaled, X_val_scaled
+
+def mpjpe_metric(y_true, y_pred):
+    y_true = tf.reshape(y_true, (-1, 13, 3))
+    y_pred = tf.reshape(y_pred, (-1, 13, 3))
+    errors = tf.norm(y_true - y_pred, axis=2)  # Shape: (batch_size, 13)
+    mpjpe = tf.reduce_mean(errors)  # Scalar
+    return mpjpe
+
+def create_model():
+    inputs = Input(shape=(8, 8, 3))
+    
+    # First Convolution Block
+    x = layers.Conv2D(64, (5,5), activation='relu', padding='same')(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+    x = layers.Dropout(rate=0.3)(x)
+    
+    # Second Convolution Block
+    x = layers.Conv2D(128, (3,3), activation='relu', padding='same')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+    x = layers.Dropout(rate=0.3)(x)
+    
+    # Residual Connection
+    residual = layers.Conv2D(256, (1,1), padding='same')(x)  # Adjust residual to match the dimensions
+    x = layers.Conv2D(256, (3,3), activation='relu', padding='same')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(256, (3,3), activation='relu', padding='same')(x)
+    x = layers.BatchNormalization()(x)
+    x = Add()([x, residual])
+    x = layers.Dropout(rate=0.4)(x)
+    
+    # Flatten the layers
+    x = layers.Flatten()(x)
+    
+    # Fully connected layers
+    x = layers.Dense(units=512, activation='relu', kernel_regularizer=regularizers.l2(0.001))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(rate=0.5)(x)
+    
+    x = layers.Dense(units=256, activation='relu', kernel_regularizer=regularizers.l2(0.001))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(rate=0.5)(x)
+    
+    # Output Layer
+    outputs = layers.Dense(units=39, activation='linear')(x)
+    
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+                  loss='mae',
+                  metrics=['mae', mpjpe_metric])
+    
+    return model
+
+def plot_history(history, fold_no=None):
+    metrics = ['loss', 'mae', 'mpjpe_metric']
+    num_metrics = len(metrics)
+    plt.figure(figsize=(12, 8))
+
+    for i, metric in enumerate(metrics):
+        plt.subplot(2, 2, i+1)
+        
+        if metric == 'mpjpe_metric':
+            scaled_training_metric = np.array(history.history[metric])
+            scaled_validation_metric = np.array(history.history[f'val_{metric}'])
+        else:
+            scaled_training_metric = np.array(history.history[metric])
+            scaled_validation_metric = np.array(history.history[f'val_{metric}'])
+        
+        plt.plot(scaled_training_metric, label=f'Training {metric}')
+        plt.plot(scaled_validation_metric, label=f'Validation {metric}')
+        plt.title(f'Fold {fold_no} - {metric.upper()} over Epochs' if fold_no else f'{metric.upper()} over Epochs')
+        plt.xlabel('Epochs')
+        plt.ylabel(f'{metric.upper()}')
+        plt.legend()
+        plt.grid(True)
+
+    plt.tight_layout()
+    if fold_no:
+        plt.suptitle(f'Fold {fold_no} Training History', fontsize=16, y=1.02)
+    else:
+        plt.suptitle('Final Training History', fontsize=16, y=1.02)
+    plt.show()
+
+
+def perform_kfold_cross_validation(X, y, k=5):
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+
+    mpjpe_per_fold = []
+    mae_per_fold = []
+    
+    fold_no = 1
+    for train_index, val_index in kf.split(X):
+        print(f'Training for fold {fold_no} ...')
+        
+        X_train, X_val = X[train_index], X[val_index]
+        y_train, y_val = y[train_index], y[val_index]
+        
+        X_train_scaled, X_val_scaled = scale_features_separately(X_train, X_val)
+        
+        y_train_scaled = output_scaler.fit_transform(y_train)
+        y_val_scaled = output_scaler.transform(y_val)
+        
+        model = create_model()
+        
+        early_stop = callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=1e-6)
+        
+        history = model.fit(
+            X_train_scaled, y_train_scaled,
+            epochs=150,
+            batch_size=128,
+            validation_data=(X_val_scaled, y_val_scaled),
+            callbacks=[early_stop, reduce_lr],
+            verbose=0 
+        )
+        
+        scores = model.evaluate(X_val_scaled, y_val_scaled, verbose=0)
+        print(f'Fold {fold_no} - MPJPE: {scores[2]:.4f}, MAE: {scores[1]:.4f}')
+        
+        mpjpe_per_fold.append(scores[2])
+        mae_per_fold.append(scores[1])
+        
+        fold_no += 1
+    
+    print('\nK-Fold Cross-Validation Results:')
+    print(f'Average MPJPE: {np.mean(mpjpe_per_fold):.4f}')
+    print(f'Average MAE: {np.mean(mae_per_fold):.4f}')
+    
+    return mpjpe_per_fold, mae_per_fold
+
+def pje(y_true, y_pred):
+    """
+    Calculate the Per Joint Error (PJE) for each joint over the entire dataset.
+
+    Parameters:
+    y_true (array-like): Ground truth coordinates, shape (num_samples, 39).
+    y_pred (array-like): Predicted coordinates, shape (num_samples, 39).
+
+    Returns:
+    numpy.ndarray: An array of shape (13,) containing the average error for each joint.
+    """
+    # Reshape the input arrays to (num_samples, 13, 3) for joint coordinates
+    y_true = y_true.reshape(-1, 13, 3)
+    y_pred = y_pred.reshape(-1, 13, 3)
+    
+    # Calculate the Euclidean distance (L2 norm) for each joint
+    errors = np.linalg.norm(y_true - y_pred, axis=2)  # Shape: (num_samples, 13)
+    
+    # Compute the average error for each joint over all samples
+    average_pje_per_joint = np.mean(errors, axis=0)  # Shape: (13,)
+    
+    return average_pje_per_joint  # Shape: (13,)
+
+def final_training_and_testing(X, y):
+    """
+    Trains the CNN model on the training set and evaluates it on the test set.
+    
+    Parameters:
+        X (numpy.ndarray): Input data of shape (num_samples, height, width, 4).
+        y (numpy.ndarray): Target data of shape (num_samples, 39).
+    
+    Returns:
+        final_model: Trained CNN model.
+    """
+    train_size = 0.6
+    val_size = 0.2
+    test_size = 0.2
+    
+    num_samples = X.shape[0]
+    train_end = int(train_size * num_samples)
+    val_end = train_end + int(val_size * num_samples)
+    
+    X_train = X[:train_end]
+    y_train = y[:train_end]
+    
+    X_val = X[train_end:val_end]
+    y_val = y[train_end:val_end]
+    
+    X_test = X[val_end:]
+    y_test = y[val_end:]
+    
+    X_train_scaled, X_val_scaled, X_test_scaled = scale_features_separately(X_train, X_val, X_test)
+    
+    X_all_scaled = np.concatenate([X_train_scaled, X_val_scaled, X_test_scaled], axis=0)
+    y_all = np.concatenate([y_train, y_val, y_test], axis=0)
+    
+    y_train_scaled = output_scaler.fit_transform(y_train)
+    y_val_scaled = output_scaler.transform(y_val)
+    y_test_scaled = output_scaler.transform(y_test)
+    
+    final_model = create_model()
+    
+    early_stop = callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=1e-6)
+    
+    history = final_model.fit(
+        X_train_scaled, y_train_scaled,
+        epochs=200,
+        batch_size=128,
+        validation_data=(X_val_scaled, y_val_scaled),
+        callbacks=[early_stop, reduce_lr],
+    )
+
+    plot_history(history)
+    
+    test_loss, test_mae, test_mpjpe = final_model.evaluate(X_test_scaled, y_test_scaled, verbose=0)
+    print(f'\nFinal Model Test Results - MPJPE: {test_mpjpe:.4f}, MAE: {test_mae:.4f}')
+    
+    y_test_pred_scaled = final_model.predict(X_test_scaled)
+    y_test_pred = output_scaler.inverse_transform(y_test_pred_scaled)
+    y_test_true = y_test  # Original unscaled targets
+
+    y_all_pred_scaled = final_model.predict(X_all_scaled)
+    y_all_pred = output_scaler.inverse_transform(y_all_pred_scaled)
+    y_all_true = y_all  # Original unscaled targets
+
+    np.save('y_pred.npy', y_all_pred)
+    np.save('y_true.npy', y_all_true)
+
+    # Compute PJE over the entire dataset
+    average_pje_per_joint = pje(y_all_true[648:742,:], y_all_pred[648:742,:])
+    print("\nPer Joint Errors (PJE) for the star pose for each of the 13 joints:")
+    for i, error in enumerate(average_pje_per_joint):
+        print(f"Joint {i+1}: {error:.4f}")
+    
+    # Generate random sample plots
+    random_numbers = np.random.randint(0, X_test.shape[0], size=3)
+
+    for idx, z in enumerate(random_numbers):
+        x_list_pred = []
+        y_list_pred = []
+        z_list_pred = []
+
+        x_list_true = []
+        y_list_true = []
+        z_list_true = []
+        for i in range(13):
+            x_list_pred.append(y_test_pred[z][i*3])
+            y_list_pred.append(y_test_pred[z][(i*3)+1])
+            z_list_pred.append(y_test_pred[z][(i*3)+2])
+
+            x_list_true.append(y_test_true[z][i*3])
+            y_list_true.append(y_test_true[z][(i*3)+1])
+            z_list_true.append(y_test_true[z][(i*3)+2])
+
+        x_array_pred = np.array(x_list_pred)
+        y_array_pred = np.array(y_list_pred)
+        z_array_pred = np.array(z_list_pred)
+
+        x_array_true = np.array(x_list_true)
+        y_array_true = np.array(y_list_true)
+        z_array_true = np.array(z_list_true)
+
+        fig = plt.figure()
+        ax = plt.axes(projection='3d')
+        ax.scatter3D(x_array_true, z_array_true, y_array_true, c='blue', label='Ground Truth')
+        ax.scatter3D(x_array_pred, z_array_pred, y_array_pred, c='red', label='Predicted')
+
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+
+        plt.title(f'3D Coordinates Plot Sample {idx+1}')
+
+        ax.legend()
+
+        plt.show()
+        
+    return final_model
+
+def main():
+    """
+    Main function to execute the CNN workflow.
+    """
+    # Loading the data
+    path_to_files =  os.path.dirname(__file__)
+    path_to_labels = os.path.join(path_to_files,'results_labels.npy')
+    path_to_data = os.path.join(path_to_files,'results_data.npy')
+
+    X_data = np.load(path_to_data)  # Shape: (num_samples, 8, 8, 4)
+    y_data = np.load(path_to_labels)  # Shape: (num_samples, 39)
+    
+    # Perform K-Fold Cross-Validation
+    #print('Starting K-Fold Cross-Validation...\n')
+    #mpjpe_per_fold, mae_per_fold = perform_kfold_cross_validation(X_data, y_data, k=3)
+    
+    # Perform Final Training and Testing
+    print('\nStarting Final Training and Testing...\n')
+    final_model = final_training_and_testing(X_data, y_data)
+
+if __name__ == "__main__":
+    main() 
